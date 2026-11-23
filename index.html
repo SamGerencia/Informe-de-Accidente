@@ -233,6 +233,204 @@ function SelectorFecha({ value, onChange }) {
   );
 }
 
+/* ---------- Conexión con la hoja ---------- */
+const ENLACE_APP = location.origin + location.pathname;
+const enlaceConcluir = folio => `${ENLACE_APP}?folio=${encodeURIComponent(folio)}`;
+async function enviarHoja(datos) {
+  const r = await fetch(SHEETS_URL, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(datos) });
+  return r.json();
+}
+async function consultarHoja(params) {
+  const r = await fetch(SHEETS_URL + "?" + new URLSearchParams(params).toString());
+  return r.json();
+}
+const normalizarFolio = s => {
+  const m = String(s).trim().match(/^acc[\s-]*(\d+)$/i);
+  return m ? "ACC-" + m[1].padStart(4, "0") : "";
+};
+
+/* ---------- Compartir / copiar texto ---------- */
+async function copiarTexto(t) {
+  try { await navigator.clipboard.writeText(t); return true; }
+  catch {
+    try {
+      const ta = document.createElement("textarea"); ta.value = t; ta.style.position="fixed"; ta.style.opacity="0";
+      document.body.appendChild(ta); ta.select(); const ok = document.execCommand("copy"); ta.remove();
+      return !!ok;
+    } catch { return false; }
+  }
+}
+async function compartirTexto(t, archivos, notificar) {
+  if (archivos && archivos.length) {
+    try { await navigator.clipboard.writeText(t); } catch {}
+    if (navigator.canShare && navigator.canShare({ files: archivos })) {
+      try { await navigator.share({ files: archivos, text: t }); notificar("ok", "Si el texto no aparece en WhatsApp, pégalo: ya está copiado."); return; }
+      catch (e) { if (e && e.name === "AbortError") return; }
+    }
+    notificar("error", "Este navegador no puede enviar fotos directamente. El texto se copió; adjunta las fotos en WhatsApp.");
+  } else if (navigator.share) {
+    try { await navigator.share({ text: t }); return; }
+    catch (e) { if (e && e.name === "AbortError") return; }
+  }
+  const a = document.createElement("a");
+  a.href = "https://wa.me/?text=" + encodeURIComponent(t);
+  a.target = "_blank"; a.rel = "noopener";
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+const Spinner = ({ cls = "h-5 w-5" }) => (
+  <svg className={cls + " animate-spin"} viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity=".3" strokeWidth="3"/><path d="M21 12a9 9 0 00-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/></svg>
+);
+
+/* ---------- Pantalla: Concluir siniestro ---------- */
+function Concluir({ folioInicial, notificar }) {
+  const [busqueda, setBusqueda] = useState(folioInicial || "");
+  const [buscando, setBuscando] = useState(false);
+  const [lista, setLista] = useState(null);
+  const [inf, setInf] = useState(null);
+  const [texto, setTexto] = useState("");
+  const [enviando, setEnviando] = useState(false);
+  const [confirmar, setConfirmar] = useState(false);
+  const candado = useRef(false);
+
+  const buscar = async (valor) => {
+    const q = String(valor ?? busqueda).trim();
+    if (!q) { notificar("error", "Escribe el folio (ej. ACC-0001) o el número Eco."); return; }
+    if (!SHEETS_URL) { notificar("error", "Falta conectar la hoja de Google Sheets."); return; }
+    const folio = normalizarFolio(q);
+    setBuscando(true); setInf(null); setLista(null); setTexto("");
+    try {
+      const r = await consultarHoja(folio ? { folio } : { eco: q });
+      if (!r.ok) { notificar("error", r.error || "No se encontró."); return; }
+      if (r.informe) setInf(r.informe);
+      else if (!r.informes.length) notificar("error", `No hay informes del Eco ${q}.`);
+      else if (r.informes.length === 1) setInf(r.informes[0]);
+      else setLista(r.informes);
+    } catch { notificar("error", "No se pudo consultar. Revisa tu conexión."); }
+    finally { setBuscando(false); }
+  };
+  useEffect(() => { if (folioInicial) buscar(folioInicial); }, []);
+
+  const concluido = inf && inf.estatus === "Concluido";
+  const textoCierre = () => inf ? (
+    `*Conclusión de Accidente · Folio ${inf.folio}*\n\n` + [
+      ["Eco:", inf.eco], ["Línea:", inf.linea], ["Tipo de Accidente:", inf.tipoAccidente],
+      ["Fecha y Hora del Accidente:", inf.fechaHoraAccidente], ["Ubicación:", inf.ubicacion],
+      ["Atiende:", inf.atiende], ["Conclusiones:", inf.conclusiones], ["Fecha de cierre:", inf.fechaCierre]
+    ].map(([l, v]) => `*${l}* ${v || "—"}`).join("\n")
+  ) : "";
+
+  const guardarConclusion = async () => {
+    setConfirmar(false);
+    if (candado.current) return;
+    candado.current = true; setEnviando(true);
+    try {
+      const r = await enviarHoja({ accion: "concluir", folio: inf.folio, conclusiones: texto.trim() });
+      if (r.ok || r.yaConcluido) {
+        setInf(p => ({ ...p, estatus: "Concluido", conclusiones: r.conclusiones, fechaCierre: r.fechaCierre }));
+        notificar(r.ok ? "ok" : "error", r.ok ? "Conclusión guardada. Ahora compártela en WhatsApp." : "Este siniestro ya estaba concluido.");
+      } else { candado.current = false; notificar("error", r.error || "No se pudo guardar."); }
+    } catch { candado.current = false; notificar("error", "No se pudo guardar. Revisa tu conexión."); }
+    finally { setEnviando(false); }
+  };
+
+  const Fila = ({ l, v }) => <p className="break-words"><b className="font-bold text-pino-900">{l}</b> {v || <span className="text-gray-300">—</span>}</p>;
+
+  return (
+    <div className="space-y-5">
+      <section className="space-y-3 rounded-3xl bg-white/80 p-5 shadow-lg ring-1 ring-pino-900/5">
+        <label className="text-[13px] font-semibold text-pino-900">Folio o número Eco</label>
+        <div className="flex gap-2">
+          <input className={inputCls + " uppercase"} placeholder="Ej. ACC-0001 o 14516" value={busqueda}
+            onChange={e=>setBusqueda(e.target.value)} onKeyDown={e=>{ if (e.key==="Enter") buscar(); }} />
+          <button type="button" onClick={()=>buscar()} disabled={buscando}
+            className="flex shrink-0 items-center gap-1.5 rounded-xl bg-pino-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-pino-800 disabled:opacity-60">
+            {buscando ? <Spinner cls="h-4 w-4" /> : "Buscar"}
+          </button>
+        </div>
+        <p className="text-[11px] text-gray-400">Tip: toca el enlace "Para concluir" del mensaje de WhatsApp y el informe se abre solo.</p>
+      </section>
+
+      {lista && !inf && (
+        <section className="space-y-2 rounded-3xl bg-white p-4 shadow-lg ring-1 ring-pino-900/5">
+          <p className="px-1 text-[13px] font-semibold text-pino-900">Elige el informe ({lista.length})</p>
+          {lista.map(x => (
+            <button key={x.folio} type="button" onClick={()=>{ setInf(x); setLista(null); }}
+              className="flex w-full items-center justify-between gap-3 rounded-xl border border-esmeralda-100 bg-white px-3.5 py-3 text-left hover:bg-esmeralda-50">
+              <span><b className="text-pino-900">{x.folio}</b><span className="block text-xs text-gray-500">{x.fechaHoraAccidente} · {x.tipoAccidente}</span></span>
+              <span className={"rounded-full px-2.5 py-1 text-[11px] font-bold " + (x.estatus === "Concluido" ? "bg-gray-200 text-gray-600" : "bg-amber-100 text-amber-700")}>{x.estatus}</span>
+            </button>
+          ))}
+        </section>
+      )}
+
+      {inf && (
+        <section className="overflow-hidden rounded-3xl bg-white shadow-lg ring-1 ring-pino-900/5">
+          <div className="flex items-center justify-between bg-pino-900 px-5 py-3">
+            <h2 className="text-sm font-bold uppercase tracking-wider text-white">Folio {inf.folio}</h2>
+            <span className={"rounded-full px-2.5 py-1 text-[11px] font-bold " + (concluido ? "bg-white/20 text-white" : "bg-amber-400 text-pino-950")}>{inf.estatus}</span>
+          </div>
+          <div className="space-y-1.5 px-5 py-4 text-[14.5px] leading-relaxed text-gray-800">
+            <Fila l="Eco:" v={inf.eco} />
+            <Fila l="Línea:" v={inf.linea} />
+            <Fila l="Tipo de Accidente:" v={inf.tipoAccidente} />
+            <Fila l="Fecha y Hora del Accidente:" v={inf.fechaHoraAccidente} />
+            <Fila l="Ubicación:" v={inf.ubicacion} />
+            <Fila l="Atiende:" v={inf.atiende} />
+            <Fila l="Base:" v={inf.base} />
+          </div>
+        </section>
+      )}
+
+      {inf && !concluido && (
+        <section className="space-y-3 rounded-3xl bg-white/80 p-5 shadow-lg ring-1 ring-pino-900/5">
+          <label className="flex items-center gap-2 text-[13px] font-semibold text-pino-900">Conclusiones</label>
+          <textarea rows={6} className={inputCls + " resize-y"} placeholder="Describe cómo concluyó el siniestro…" value={texto} onChange={e=>setTexto(e.target.value)} />
+          <p className="text-[11px] text-gray-400">Solo se puede enviar una vez y no se podrá corregir.</p>
+          <button type="button" disabled={enviando}
+            onClick={()=>{ if (!texto.trim()) { notificar("error", "Escribe las conclusiones."); return; } setConfirmar(true); }}
+            className={"flex w-full items-center justify-center gap-2 rounded-2xl py-4 text-[15px] font-bold text-white shadow-lg active:scale-[0.98] disabled:opacity-60 " + (texto.trim() ? "bg-pino-900 hover:bg-pino-800" : "bg-pino-900/60")}>
+            {enviando ? <><Spinner /> Guardando…</> : "Guardar conclusión"}
+          </button>
+        </section>
+      )}
+
+      {inf && concluido && (
+        <section className="space-y-3">
+          <div className="rounded-3xl border-2 border-esmeralda-500/40 bg-esmeralda-50 p-5">
+            <p className="flex items-center gap-1.5 text-[13px] font-bold text-pino-900">
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>
+              Siniestro concluido · {inf.fechaCierre}
+            </p>
+            <p className="mt-2 whitespace-pre-wrap break-words text-[14.5px] text-gray-800">{inf.conclusiones}</p>
+          </div>
+          <button type="button" onClick={()=>compartirTexto(textoCierre(), null, notificar)}
+            className="flex w-full items-center justify-center gap-2 rounded-2xl bg-esmeralda-600 py-4 text-[15px] font-bold text-white shadow-lg shadow-esmeralda-600/30 active:scale-[0.98] hover:bg-esmeralda-500">
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>
+            Compartir conclusión
+          </button>
+          <button type="button" onClick={async()=>notificar(await copiarTexto(textoCierre()) ? "ok" : "error", "Copiado. Respóndelo al aviso en WhatsApp.")}
+            className="mx-auto flex items-center gap-1.5 py-1.5 text-[13px] font-semibold text-pino-700 hover:text-esmeralda-600">Solo copiar texto</button>
+          <p className="text-center text-xs text-gray-500">En WhatsApp, mantén presionado el aviso original y elige <b>Responder</b> para pegar la conclusión.</p>
+        </section>
+      )}
+
+      {confirmar && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center" onClick={()=>setConfirmar(false)}>
+          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl" onClick={e=>e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-pino-900">¿Guardar la conclusión del folio {inf.folio}?</h3>
+            <p className="mt-1 text-sm text-gray-500">El siniestro quedará como <b>Concluido</b> y la conclusión <b>no se podrá corregir</b>.</p>
+            <div className="mt-5 grid grid-cols-2 gap-2">
+              <button onClick={()=>setConfirmar(false)} className="rounded-xl border border-gray-200 py-3 font-semibold text-gray-600">Revisar</button>
+              <button onClick={guardarConclusion} className="rounded-xl bg-pino-900 py-3 font-semibold text-white">Sí, guardar</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [f, setF] = useState(INICIAL);
   const [aviso, setAviso] = useState(null);
@@ -244,6 +442,10 @@ function App() {
   const entradaFotos = useRef(null);
   const candado = useRef(false); // bloqueo inmediato contra doble toque
   const [confirmar, setConfirmar] = useState(false);
+  const [folio, setFolio] = useState("");
+  const folioUrl = useMemo(() => normalizarFolio(new URLSearchParams(location.search).get("folio") || ""), []);
+  const [modo, setModo] = useState(folioUrl ? "concluir" : "aviso");
+  const cambiarModo = m => { setModo(m); if (location.search) history.replaceState(null, "", location.pathname); window.scrollTo(0, 0); };
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
   const notificar = (tipo, texto) => { setAviso({ tipo, texto }); clearTimeout(window.__t); window.__t = setTimeout(()=>setAviso(null), 3800); };
 
@@ -304,7 +506,13 @@ function App() {
   ];
 
   const textoWhatsApp = () =>
-    `*${TITULO}*\n\n` + filas.map(([l, v]) => `*${l}* ${v}`).join("\n");
+    `*${TITULO} · Folio ${folio}*\n\n` + filas.map(([l, v]) => `*${l}* ${v}`).join("\n") +
+    `\n\n*Para concluir este siniestro:* ${enlaceConcluir(folio)}`;
+  const exigirGuardado = () => {
+    if (guardado && folio) return true;
+    notificar("error", "Primero toca Guardar para obtener el folio.");
+    return false;
+  };
 
   const [intento, setIntento] = useState(false);
   const faltantes = {};
@@ -378,37 +586,14 @@ function App() {
   const quitarFoto = id => setFotos(prev => { const p = prev.find(x => x.id === id); if (p) URL.revokeObjectURL(p.url); return prev.filter(x => x.id !== id); });
 
   const compartir = async () => {
-    if (!validar()) return;
-    const t = textoWhatsApp();
-    if (fotos.length) {
-      const archivos = fotos.map((p, i) => new File([p.blob], `Eco_${f.eco.trim() || "SN"}_foto${i + 1}.jpg`, { type: "image/jpeg" }));
-      try { await navigator.clipboard.writeText(t); } catch {}
-      if (navigator.canShare && navigator.canShare({ files: archivos })) {
-        try { await navigator.share({ files: archivos, text: t }); notificar("ok", "Si el texto no aparece en WhatsApp, pégalo: ya está copiado."); return; }
-        catch (e) { if (e && e.name === "AbortError") return; }
-      }
-      notificar("error", "Este navegador no puede enviar fotos directamente. El texto se copió; adjunta las fotos en WhatsApp.");
-    } else if (navigator.share) {
-      try { await navigator.share({ text: t }); return; }
-      catch (e) { if (e && e.name === "AbortError") return; }
-    }
-    const a = document.createElement("a");
-    a.href = "https://wa.me/?text=" + encodeURIComponent(t);
-    a.target = "_blank"; a.rel = "noopener";
-    document.body.appendChild(a); a.click(); a.remove();
+    if (!validar() || !exigirGuardado()) return;
+    const archivos = fotos.map((p, i) => new File([p.blob], `${folio}_Eco_${f.eco.trim() || "SN"}_foto${i + 1}.jpg`, { type: "image/jpeg" }));
+    await compartirTexto(textoWhatsApp(), archivos, notificar);
   };
 
   const copiar = async () => {
-    if (!validar()) return;
-    const t = textoWhatsApp();
-    try { await navigator.clipboard.writeText(t); notificar("ok", "Copiado. Pégalo en WhatsApp."); }
-    catch {
-      try {
-        const ta = document.createElement("textarea"); ta.value = t; ta.style.position="fixed"; ta.style.opacity="0";
-        document.body.appendChild(ta); ta.select(); const ok = document.execCommand("copy"); ta.remove();
-        if (!ok) throw 0; notificar("ok", "Copiado. Pégalo en WhatsApp.");
-      } catch { notificar("error", "No se pudo copiar automáticamente."); }
-    }
+    if (!validar() || !exigirGuardado()) return;
+    notificar(await copiarTexto(textoWhatsApp()) ? "ok" : "error", "Copiado. Pégalo en WhatsApp.");
   };
 
   const guardar = async () => {
@@ -434,16 +619,18 @@ function App() {
       fechaRegistro: new Date().toISOString()
     };
     try {
-      await fetch(SHEETS_URL, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(datos) });
+      const r = await enviarHoja(datos);
+      if (!r || !r.ok || !r.folio) throw new Error((r && r.error) || "sin folio");
+      setFolio(r.folio);
       setGuardado(true);
-      notificar("ok", "Informe guardado. Quedó bloqueado para evitar duplicados.");
+      notificar("ok", `Guardado con folio ${r.folio}. Ahora toca Compartir.`);
     } catch {
       candado.current = false;
-      notificar("error", "No se pudo enviar. Revisa tu conexión (o abre la app desde el enlace publicado).");
+      notificar("error", "No se pudo guardar. Revisa tu conexión e inténtalo de nuevo.");
     } finally { setEnviando(false); }
   };
 
-  const limpiar = () => { fotos.forEach(p => URL.revokeObjectURL(p.url)); setFotos([]); setF(INICIAL); setIntento(false); setGuardado(false); candado.current = false; setConfirmar(false); notificar("ok", "Formulario limpio. Listo para un nuevo reporte."); };
+  const limpiar = () => { fotos.forEach(p => URL.revokeObjectURL(p.url)); setFotos([]); setF(INICIAL); setIntento(false); setGuardado(false); setFolio(""); candado.current = false; setConfirmar(false); notificar("ok", "Formulario limpio. Listo para un nuevo reporte."); };
 
   const togglePax = k => setF(p => ({ ...p, pax: { ...p.pax, [k]: p.pax[k] === null ? "" : null } }));
 
@@ -465,6 +652,14 @@ function App() {
       </header>
 
       <main className="space-y-5 bg-gray-50 px-4 pt-5">
+        <div className="grid grid-cols-2 gap-1 rounded-2xl bg-white p-1 shadow-sm ring-1 ring-pino-900/5">
+          {[["aviso","Nuevo aviso"],["concluir","Concluir siniestro"]].map(([m, l]) => (
+            <button key={m} type="button" onClick={()=>cambiarModo(m)}
+              className={"rounded-xl py-2.5 text-sm font-bold transition " + (modo === m ? "bg-pino-900 text-white shadow" : "text-pino-800 hover:bg-esmeralda-50")}>{l}</button>
+          ))}
+        </div>
+
+        {modo === "concluir" ? <Concluir folioInicial={folioUrl} notificar={notificar} /> : (<>
         <ErroresCtx.Provider value={intento ? faltantes : {}}>
         <section className="relative space-y-5 rounded-3xl bg-white/80 p-5 shadow-lg ring-1 ring-pino-900/5 backdrop-blur">
           <Campo n="1" label="Eco">
@@ -675,24 +870,16 @@ function App() {
             <span className="flex items-center gap-1.5 text-[11px] text-esmeralda-100"><span className="h-2 w-2 animate-pulse rounded-full bg-esmeralda-500"></span>En vivo</span>
           </div>
           <div className="space-y-1.5 px-5 py-4 text-[14.5px] leading-relaxed text-gray-800">
-            <p className="mb-3 font-bold text-pino-900">{TITULO}</p>
+            <p className="mb-3 font-bold text-pino-900">{TITULO} · {folio ? `Folio ${folio}` : <span className="font-normal text-gray-400">el folio se asigna al guardar</span>}</p>
             {filas.map(([l, v]) => (
               <p key={l} className="whitespace-pre-wrap break-words"><b className="font-bold text-pino-900">{l}</b> {v ? v : <span className="text-gray-300">—</span>}</p>
             ))}
+            {folio && <p className="pt-2 break-words"><b className="font-bold text-pino-900">Para concluir este siniestro:</b> <span className="text-esmeralda-600">{enlaceConcluir(folio)}</span></p>}
           </div>
         </section>
 
         {/* Acciones */}
         <section className="space-y-2.5">
-          <button onClick={compartir} className={"flex w-full items-center justify-center gap-2 rounded-2xl " + (numFaltantes > 0 ? "bg-esmeralda-600/60 " : "bg-esmeralda-600 ") + "py-4 text-[15px] font-bold text-white shadow-lg shadow-esmeralda-600/30 active:scale-[0.98] hover:bg-esmeralda-500"}>
-            {numFaltantes > 0 && <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>}
-            {numFaltantes === 0 && <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>}
-            Compartir{numFaltantes > 0 && <span className="ml-1 rounded-full bg-white/25 px-2 py-0.5 text-xs">faltan {numFaltantes}</span>}
-          </button>
-          <button onClick={copiar} className="mx-auto -mt-1 flex items-center gap-1.5 py-1.5 text-[13px] font-semibold text-pino-700 hover:text-esmeralda-600">
-            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
-            Solo copiar texto
-          </button>
           <button onClick={guardar} disabled={enviando || guardado}
             className={"flex w-full items-center justify-center gap-2 rounded-2xl py-4 text-[15px] font-bold shadow-lg active:scale-[0.98] disabled:active:scale-100 " +
               (guardado ? "cursor-not-allowed bg-gray-200 text-gray-500 shadow-none" : (numFaltantes > 0 ? "bg-pino-900/60 " : "bg-pino-900 ") + "text-white shadow-pino-900/30 hover:bg-pino-800 disabled:opacity-60")}>
@@ -704,11 +891,21 @@ function App() {
             {enviando ? "Guardando…" : guardado ? "Guardado" : "Guardar"}
             {!enviando && !guardado && numFaltantes > 0 && <span className="ml-1 rounded-full bg-white/25 px-2 py-0.5 text-xs">faltan {numFaltantes}</span>}
           </button>
-          {guardado && <p className="-mt-1 text-center text-xs text-gray-500">Este informe ya se envió. Para capturar otro, usa "Limpiar formulario".</p>}
+          {guardado && <p className="-mt-1 text-center text-xs text-gray-500">Guardado con folio <b>{folio}</b>. Ahora compártelo en WhatsApp. Para capturar otro, usa "Limpiar formulario".</p>}
+          <button onClick={compartir} className={"flex w-full items-center justify-center gap-2 rounded-2xl " + (!guardado ? "bg-esmeralda-600/60 " : "bg-esmeralda-600 ") + "py-4 text-[15px] font-bold text-white shadow-lg shadow-esmeralda-600/30 active:scale-[0.98] hover:bg-esmeralda-500"}>
+            {!guardado && <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>}
+            {guardado && <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>}
+            Compartir{!guardado && <span className="ml-1 rounded-full bg-white/25 px-2 py-0.5 text-xs">primero guarda</span>}
+          </button>
+          <button onClick={copiar} className="mx-auto -mt-1 flex items-center gap-1.5 py-1.5 text-[13px] font-semibold text-pino-700 hover:text-esmeralda-600">
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
+            Solo copiar texto
+          </button>
           <button onClick={()=>setConfirmar(true)} className="w-full rounded-2xl border-2 border-pino-800/20 bg-white py-3.5 text-[15px] font-semibold text-pino-800 active:scale-[0.98] hover:bg-esmeralda-50">
             Limpiar formulario
           </button>
         </section>
+        </>)}
       </main>
 
       {avisoGps && (
