@@ -1,7 +1,12 @@
 <!DOCTYPE html>
+<!--
+  © 2026 Gerencia de Seguridad Vial. Uso exclusivo interno. Prohibida su copia o modificación.
+  Informe de Accidente · Grupo Estrella Blanca
+-->
 <html lang="es">
 <head>
 <meta charset="UTF-8" />
+<meta name="copyright" content="© 2026 Gerencia de Seguridad Vial. Uso exclusivo interno. Prohibida su copia o modificación." />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Informe de Accidente</title>
 <link rel="manifest" href="manifest.json" />
@@ -313,6 +318,41 @@ async function compartirTexto(t, archivos, notificar) {
   document.body.appendChild(a); a.click(); a.remove();
 }
 
+// Igual que compartirTexto, pero devuelve true si se abrió WhatsApp / compartir y false si se canceló
+async function enviarWhatsApp(t, archivos, notificar) {
+  if (archivos && archivos.length) {
+    try { await navigator.clipboard.writeText(t); } catch {}
+    if (navigator.canShare && navigator.canShare({ files: archivos })) {
+      try { await navigator.share({ files: archivos, text: t }); notificar("ok", "Si el texto no aparece en WhatsApp, pégalo: ya está copiado."); return true; }
+      catch (e) { if (e && e.name === "AbortError") return false; }
+    }
+    notificar("error", "Este navegador no puede enviar fotos directamente. El texto se copió; adjunta las fotos en WhatsApp.");
+  } else if (navigator.share) {
+    try { await navigator.share({ text: t }); return true; }
+    catch (e) { if (e && e.name === "AbortError") return false; }
+  }
+  const a = document.createElement("a");
+  a.href = "https://wa.me/?text=" + encodeURIComponent(t);
+  a.target = "_blank"; a.rel = "noopener";
+  document.body.appendChild(a); a.click(); a.remove();
+  return true;
+}
+
+/* ---------- Respaldo de informes guardados pero sin enviar ---------- */
+const CLAVE_PEND = "pendientes_informe_accidente_v1";
+const leerPend = () => { try { return JSON.parse(localStorage.getItem(CLAVE_PEND) || "[]") || []; } catch { return []; } };
+const escribirPend = lista => {
+  try { localStorage.setItem(CLAVE_PEND, JSON.stringify(lista)); }
+  catch { try { localStorage.setItem(CLAVE_PEND, JSON.stringify(lista.map(p => ({ ...p, fotos: [] })))); } catch {} }
+};
+const agregarPend = p => escribirPend([...leerPend().filter(x => x.id !== p.id), p]);
+const quitarPend = id => escribirPend(leerPend().filter(x => x.id !== id));
+const b64aArchivo = (b64, nombre) => {
+  const bin = atob(b64); const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return new File([u], nombre, { type: "image/jpeg" });
+};
+
 const Spinner = ({ cls = "h-5 w-5" }) => (
   <svg className={cls + " animate-spin"} viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity=".3" strokeWidth="3"/><path d="M21 12a9 9 0 00-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/></svg>
 );
@@ -478,6 +518,11 @@ function App() {
   const candado = useRef(false); // bloqueo inmediato contra doble toque
   const [confirmar, setConfirmar] = useState(false);
   const [folio, setFolio] = useState("");
+  const [envio, setEnvio] = useState(false);        // ventana "falta enviarlo" después de guardar
+  const [enviado, setEnviado] = useState(false);
+  const [copiado, setCopiado] = useState(false);
+  const [pendientes, setPendientes] = useState(() => leerPend());
+  const [verPendientes, setVerPendientes] = useState(() => leerPend().length > 0);
   const folioUrl = useMemo(() => normalizarFolio(new URLSearchParams(location.search).get("folio") || ""), []);
   const [modo, setModo] = useState(folioUrl ? "concluir" : "aviso");
   const cambiarModo = m => { setModo(m); if (location.search) history.replaceState(null, "", location.pathname); window.scrollTo(0, 0); };
@@ -540,9 +585,9 @@ function App() {
     ...(fotos.length ? [["Fotografías:", `${fotos.length} adjunta${fotos.length > 1 ? "s" : ""}`]] : []),
   ];
 
-  const textoWhatsApp = () =>
-    `*${TITULO} · Folio ${folio}*\n\n` + filas.map(([l, v]) => `*${l}* ${v}`).join("\n") +
-    `\n\n*Para concluir este siniestro:* ${enlaceConcluir(folio)}`;
+  const textoWhatsApp = (fol = folio) =>
+    `*${TITULO} · Folio ${fol}*\n\n` + filas.map(([l, v]) => `*${l}* ${v}`).join("\n") +
+    `\n\n*Para concluir este siniestro:* ${enlaceConcluir(fol)}`;
   const exigirGuardado = () => {
     if (guardado && folio) return true;
     notificar("error", "Primero toca Guardar para obtener el folio.");
@@ -579,6 +624,9 @@ function App() {
     : "Coordenadas no válidas. Pega latitud, longitud (19.432608, -99.133209) o borra el campo";
   if (!f.atiende || !f.base) faltantes["9"] = !f.atiende && !f.base ? "Selecciona quién atiende y la base" : !f.atiende ? "Selecciona quién atiende" : "Selecciona la base";
   if (!f.observaciones.trim()) faltantes["10"] = "Escribe las observaciones";
+  // Candado: mínimo 1 fotografía como evidencia
+  if (procesandoFotos) faltantes["11"] = "Espera a que terminen de cargarse las fotografías";
+  else if (fotos.length === 0) faltantes["11"] = "Agrega al menos 1 fotografía como evidencia";
   if (!autoridad) faltantes["12"] = "Captura la autoridad que interviene o pon N/A";
   if (!siniestro) faltantes["13"] = "Captura el número de siniestro o pon N/A";
   const numFaltantes = Object.keys(faltantes).length;
@@ -620,15 +668,24 @@ function App() {
   };
   const quitarFoto = id => setFotos(prev => { const p = prev.find(x => x.id === id); if (p) URL.revokeObjectURL(p.url); return prev.filter(x => x.id !== id); });
 
-  const compartir = async () => {
-    if (!validar() || !exigirGuardado()) return;
-    const archivos = fotos.map((p, i) => new File([p.blob], `${folio}_Eco_${f.eco.trim() || "SN"}_foto${i + 1}.jpg`, { type: "image/jpeg" }));
-    await compartirTexto(textoWhatsApp(), archivos, notificar);
-  };
+  const nombreFoto = (i, fol = folio) => `${fol}_Eco_${f.eco.trim() || "SN"}_foto${i + 1}.jpg`;
+  const archivosFotos = () => fotos.map((p, i) => new File([p.blob], nombreFoto(i), { type: "image/jpeg" }));
 
-  const copiar = async () => {
-    if (!validar() || !exigirGuardado()) return;
-    notificar(await copiarTexto(textoWhatsApp()) ? "ok" : "error", "Copiado. Pégalo en WhatsApp.");
+  // Envía el informe actual; si se abrió WhatsApp se quita de pendientes
+  const enviarActual = async () => {
+    if (!exigirGuardado()) return;
+    const ok = await enviarWhatsApp(textoWhatsApp(), archivosFotos(), notificar);
+    if (ok) { quitarPend(folio); setPendientes(leerPend()); setEnviado(true); setEnvio(false); }
+  };
+  const copiarActual = async () => {
+    if (!exigirGuardado()) return;
+    if (await copiarTexto(textoWhatsApp())) { setCopiado(true); notificar("ok", "Copiado. Pégalo en WhatsApp."); }
+    else notificar("error", "No se pudo copiar automáticamente.");
+  };
+  const marcarEnviado = id => { quitarPend(id); const l = leerPend(); setPendientes(l); if (!l.length) setVerPendientes(false); if (id === folio) { setEnviado(true); setEnvio(false); } };
+  const enviarPendiente = async p => {
+    const archivos = (p.fotos || []).map(x => b64aArchivo(x.datos, x.nombre));
+    if (await enviarWhatsApp(p.texto, archivos, notificar)) marcarEnviado(p.id);
   };
 
   const guardar = async () => {
@@ -658,14 +715,19 @@ function App() {
       if (!r || !r.ok || !r.folio) throw new Error((r && r.error) || "sin folio");
       setFolio(r.folio);
       setGuardado(true);
-      notificar("ok", `Guardado con folio ${r.folio}. Ahora toca Compartir.`);
+      // Respaldo en el celular por si cierran la app sin enviarlo
+      agregarPend({ id: r.folio, eco: f.eco.trim(), fecha: new Date().toLocaleString("es-MX"), texto: textoWhatsApp(r.folio),
+        fotos: fotos.map((p, i) => ({ nombre: nombreFoto(i, r.folio), datos: p.base64 })) });
+      setPendientes(leerPend());
+      setCopiado(false);
+      setEnvio(true);
     } catch {
       candado.current = false;
       notificar("error", "No se pudo guardar. Revisa tu conexión e inténtalo de nuevo.");
     } finally { setEnviando(false); }
   };
 
-  const limpiar = () => { fotos.forEach(p => URL.revokeObjectURL(p.url)); setFotos([]); setF(INICIAL); setIntento(false); setGuardado(false); setFolio(""); candado.current = false; setConfirmar(false); notificar("ok", "Formulario limpio. Listo para un nuevo reporte."); };
+  const limpiar = () => { fotos.forEach(p => URL.revokeObjectURL(p.url)); setFotos([]); setF(INICIAL); setIntento(false); setGuardado(false); setFolio(""); setEnviado(false); setCopiado(false); setEnvio(false); candado.current = false; setConfirmar(false); notificar("ok", "Formulario limpio. Listo para un nuevo reporte."); };
 
   const togglePax = k => setF(p => ({ ...p, pax: { ...p.pax, [k]: p.pax[k] === null ? "" : null } }));
 
@@ -695,6 +757,13 @@ function App() {
         </div>
 
         {modo === "concluir" ? <Concluir folioInicial={folioUrl} notificar={notificar} /> : (<>
+        {pendientes.length > 0 && (
+          <button type="button" onClick={()=>setVerPendientes(true)}
+            className="flex w-full items-center gap-3 rounded-2xl bg-amber-50 px-4 py-3 text-left ring-2 ring-amber-400">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-amber-400 text-lg font-bold text-white">!</span>
+            <span className="text-sm text-amber-900"><b>{pendientes.length === 1 ? "Tienes 1 informe sin enviar" : `Tienes ${pendientes.length} informes sin enviar`}</b><span className="block text-xs">Toca aquí para enviarlo por WhatsApp.</span></span>
+          </button>
+        )}
         <ErroresCtx.Provider value={intento ? faltantes : {}}>
         <section className="relative space-y-5 rounded-3xl bg-white/80 p-5 shadow-lg ring-1 ring-pino-900/5 backdrop-blur">
           <Campo n="1" label="Eco">
@@ -864,7 +933,7 @@ function App() {
             <textarea rows={5} className={inputCls + " resize-y"} placeholder="Describe lo ocurrido…" value={f.observaciones} onChange={e=>set("observaciones", e.target.value)} />
           </Campo>
 
-          <Campo n="11" label="Fotografías (opcional, máx. 3)">
+          <Campo n="11" label="Fotografías (obligatorio: mín. 1, máx. 3)">
             <input ref={entradaFotos} type="file" accept="image/*" multiple className="hidden" onChange={e=>agregarFotos(e.target.files)} />
             <div className="grid grid-cols-3 gap-2">
               {fotos.map((p, i) => (
@@ -885,7 +954,7 @@ function App() {
                 </button>
               )}
             </div>
-            <p className="text-[11px] text-gray-400">Toma la foto con la cámara o elígela de la galería. {fotos.length}/{MAX_FOTOS}</p>
+            <p className="text-[11px] text-gray-400">Obligatorio: al menos 1 foto como evidencia. Tómala con la cámara o elígela de la galería. {fotos.length}/{MAX_FOTOS}</p>
           </Campo>
 
           <Campo n="12" label="Autoridad que interviene">
@@ -913,35 +982,59 @@ function App() {
           </div>
         </section>
 
-        {/* Acciones */}
+        {/* Acciones: un solo botón */}
         <section className="space-y-2.5">
-          <button onClick={guardar} disabled={enviando || guardado}
-            className={"flex w-full items-center justify-center gap-2 rounded-2xl py-4 text-[15px] font-bold shadow-lg active:scale-[0.98] disabled:active:scale-100 " +
-              (guardado ? "cursor-not-allowed bg-gray-200 text-gray-500 shadow-none" : (numFaltantes > 0 ? "bg-pino-900/60 " : "bg-pino-900 ") + "text-white shadow-pino-900/30 hover:bg-pino-800 disabled:opacity-60")}>
+          <button onClick={guardado ? enviarActual : guardar} disabled={enviando}
+            className={"flex w-full items-center justify-center gap-2 rounded-2xl py-4 text-[15px] font-bold text-white shadow-lg shadow-esmeralda-600/30 active:scale-[0.98] hover:bg-esmeralda-500 disabled:opacity-60 " +
+              (!guardado && numFaltantes > 0 ? "bg-esmeralda-600/60" : "bg-esmeralda-600")}>
             {enviando
-              ? <svg className="h-5 w-5 animate-spin" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity=".3" strokeWidth="3"/><path d="M21 12a9 9 0 00-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/></svg>
-              : (guardado || numFaltantes > 0)
-                ? <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>
-                : <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>}
-            {enviando ? "Guardando…" : guardado ? "Guardado" : "Guardar"}
+              ? <Spinner />
+              : <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 00-8.6 15.1L2 22l5-1.3A10 10 0 1012 2zm0 18.2a8.2 8.2 0 01-4.2-1.2l-.3-.2-3 .8.8-2.9-.2-.3A8.2 8.2 0 1112 20.2zm4.5-6.1c-.2-.1-1.5-.7-1.7-.8s-.4-.1-.6.1-.7.8-.8 1-.3.2-.5.1a6.7 6.7 0 01-3.3-2.9c-.3-.4.2-.4.7-1.4a.5.5 0 000-.5l-.8-1.8c-.2-.5-.4-.4-.6-.4h-.5a1 1 0 00-.7.3 3 3 0 00-.9 2.2 5.2 5.2 0 001.1 2.7 11.8 11.8 0 004.5 4c1.7.7 2.3.8 3.2.6a2.7 2.7 0 001.8-1.2 2.2 2.2 0 00.1-1.2c0-.1-.2-.2-.5-.3z"/></svg>}
+            {enviando ? "Guardando…" : guardado ? (enviado ? "Enviar de nuevo por WhatsApp" : "Enviar por WhatsApp") : "Guardar y enviar por WhatsApp"}
             {!enviando && !guardado && numFaltantes > 0 && <span className="ml-1 rounded-full bg-white/25 px-2 py-0.5 text-xs">faltan {numFaltantes}</span>}
           </button>
-          {guardado && <p className="-mt-1 text-center text-xs text-gray-500">Guardado con folio <b>{folio}</b>. Ahora compártelo en WhatsApp. Para capturar otro, usa "Limpiar formulario".</p>}
-          <button onClick={compartir} className={"flex w-full items-center justify-center gap-2 rounded-2xl " + (!guardado ? "bg-esmeralda-600/60 " : "bg-esmeralda-600 ") + "py-4 text-[15px] font-bold text-white shadow-lg shadow-esmeralda-600/30 active:scale-[0.98] hover:bg-esmeralda-500"}>
-            {!guardado && <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>}
-            {guardado && <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>}
-            Compartir{!guardado && <span className="ml-1 rounded-full bg-white/25 px-2 py-0.5 text-xs">primero guarda</span>}
-          </button>
-          <button onClick={copiar} className="mx-auto -mt-1 flex items-center gap-1.5 py-1.5 text-[13px] font-semibold text-pino-700 hover:text-esmeralda-600">
-            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
-            Solo copiar texto
-          </button>
+          {guardado && !enviado && <p className="-mt-1 text-center text-xs font-semibold text-amber-700">Guardado con folio {folio}. Falta enviarlo por WhatsApp.</p>}
+          {guardado && enviado && <p className="-mt-1 text-center text-xs text-gray-500">✓ Enviado. Para capturar otro, usa "Limpiar formulario".</p>}
           <button onClick={()=>setConfirmar(true)} className="w-full rounded-2xl border-2 border-pino-800/20 bg-white py-3.5 text-[15px] font-semibold text-pino-800 active:scale-[0.98] hover:bg-esmeralda-50">
             Limpiar formulario
           </button>
         </section>
         </>)}
+        <footer className="px-2 pt-4 text-center text-[11px] leading-snug text-gray-400">© 2026 Gerencia de Seguridad Vial. Uso exclusivo interno. Prohibida su copia o modificación.</footer>
       </main>
+
+      {envio && folio && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-4 sm:items-center">
+          <div className="w-full max-w-sm rounded-3xl bg-white p-6 text-center shadow-2xl">
+            <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-esmeralda-50 text-2xl">✓</div>
+            <h3 className="mt-3 text-lg font-bold text-pino-900">Guardado con folio {folio}</h3>
+            <p className="mt-1 text-sm font-semibold text-amber-700">Aún falta enviarlo al grupo de WhatsApp.</p>
+            <button onClick={enviarActual} className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-esmeralda-600 py-4 text-[15px] font-bold text-white shadow-lg hover:bg-esmeralda-500">Enviar por WhatsApp</button>
+            <button onClick={copiarActual} className="mx-auto mt-3 block text-[13px] font-semibold text-pino-700 underline">Solo copiar texto</button>
+            {copiado && <button onClick={()=>marcarEnviado(folio)} className="mt-3 w-full rounded-xl border border-gray-200 py-3 text-sm font-semibold text-gray-600">Ya lo pegué y lo envié</button>}
+          </div>
+        </div>
+      )}
+
+      {modo === "aviso" && verPendientes && pendientes.length > 0 && !envio && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-4 sm:items-center">
+          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl">
+            <h3 className="flex items-center gap-2 text-lg font-bold text-amber-700"><span className="grid h-7 w-7 place-items-center rounded-full bg-amber-400 text-white">!</span>{pendientes.length === 1 ? "Tienes un informe sin enviar" : `Tienes ${pendientes.length} informes sin enviar`}</h3>
+            <p className="mt-1 text-sm text-gray-500">Se guardó en la hoja, pero no se envió al grupo de WhatsApp.</p>
+            <div className="mt-4 space-y-2.5">
+              {pendientes.map(p => (
+                <div key={p.id} className="rounded-2xl border border-amber-200 bg-amber-50 p-3">
+                  <p className="text-sm font-bold text-pino-900">Folio {p.id} · Eco {p.eco}</p>
+                  <p className="text-xs text-gray-500">{p.fecha}</p>
+                  <button onClick={()=>enviarPendiente(p)} className="mt-2 w-full rounded-xl bg-esmeralda-600 py-2.5 text-sm font-bold text-white">Enviar ahora por WhatsApp</button>
+                  <button onClick={()=>marcarEnviado(p.id)} className="mt-1.5 w-full py-1.5 text-xs font-semibold text-gray-500 underline">Ya lo envié</button>
+                </div>
+              ))}
+            </div>
+            <button onClick={()=>setVerPendientes(false)} className="mt-4 w-full rounded-xl border border-gray-200 py-3 text-sm font-semibold text-gray-600">Recordármelo después</button>
+          </div>
+        </div>
+      )}
 
       {avisoGps && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center" onClick={()=>setAvisoGps(false)}>
